@@ -460,7 +460,7 @@ class TradingBot:
     def _prune_call_timestamps(self) -> None:
         """Drop Twelve Data call estimates older than 60 seconds."""
         now = time.time()
-        while self._td_call_timestamps and now - self._td_call_timestamps[0] > 60:
+        while self._td_call_timestamps and now - self._td_call_timestamps[0] >= 60:
             self._td_call_timestamps.popleft()
 
     def _reserve_call_budget(self, call_count: int) -> None:
@@ -468,6 +468,27 @@ class TradingBot:
         now = time.time()
         for _ in range(call_count):
             self._td_call_timestamps.append(now)
+
+    def _ea_fresh_symbols(self, symbols: List[str]) -> set:
+        """Return the subset of symbols that have fresh data in the EA push store."""
+        if not self.ea_data_enabled:
+            return set()
+        timeframe = self.config["trading"]["timeframe"]
+        htf = self.config["trading"].get("higher_timeframe", "4h")
+        freshness = market_data_store.freshness_report()
+        fresh = set()
+        for sym in symbols:
+            sym_data = freshness.get(sym.upper(), {})
+            tf_age = sym_data.get(timeframe, {}).get("age_seconds")
+            htf_age = sym_data.get(htf, {}).get("age_seconds")
+            if (
+                tf_age is not None
+                and tf_age <= self.ea_data_stale_after_seconds
+                and htf_age is not None
+                and htf_age <= self.ea_data_stale_after_seconds
+            ):
+                fresh.add(sym)
+        return fresh
 
     def _next_symbols_batch(self) -> List[str]:
         """Return the next symbol batch in round-robin order."""
@@ -483,27 +504,43 @@ class TradingBot:
             selected.append(symbols[(start + offset) % total_symbols])
 
         if self._rate_guard_enabled:
+            # Symbols with fresh EA data won't call Twelve Data — exclude them from
+            # the API call budget so they never block other symbols from being scanned.
+            ea_fresh = self._ea_fresh_symbols(selected)
+            api_symbols = [s for s in selected if s not in ea_fresh]
+
             self._prune_call_timestamps()
             calls_used_last_min = len(self._td_call_timestamps)
             calls_remaining = max(0, self.max_calls_per_minute - calls_used_last_min)
-            max_symbols_allowed = calls_remaining // self.estimated_calls_per_symbol
-            if max_symbols_allowed <= 0:
-                log.warning(
-                    "Twelve Data call budget exhausted: used=%s, limit=%s. Deferring this cycle.",
-                    calls_used_last_min,
-                    self.max_calls_per_minute,
-                )
-                return []
-            if max_symbols_allowed < len(selected):
-                selected = selected[:max_symbols_allowed]
+            max_api_allowed = calls_remaining // self.estimated_calls_per_symbol
 
-            estimated_calls = len(selected) * self.estimated_calls_per_symbol
-            self._reserve_call_budget(estimated_calls)
+            if api_symbols and max_api_allowed <= 0:
+                if not ea_fresh:
+                    log.warning(
+                        "Twelve Data call budget exhausted: used=%s, limit=%s. Deferring this cycle.",
+                        calls_used_last_min,
+                        self.max_calls_per_minute,
+                    )
+                    return []
+                # EA-fresh symbols can still run even if API budget is zero
+                api_symbols = []
+            elif len(api_symbols) > max_api_allowed:
+                api_symbols = api_symbols[:max_api_allowed]
+
+            # Rebuild selected: EA-fresh first (order stable), then API symbols
+            selected = [s for s in selected if s in ea_fresh or s in api_symbols]
+
+            estimated_calls = len(api_symbols) * self.estimated_calls_per_symbol
+            if estimated_calls:
+                self._reserve_call_budget(estimated_calls)
+
             log.info(
-                "Batch scan (rate-guarded): symbols=%s/%s selected=%s used_calls=%s remaining_calls=%s est_calls=%s",
+                "Batch scan (rate-guarded): symbols=%s/%s selected=%s ea_fresh=%s "
+                "used_calls=%s remaining_calls=%s est_api_calls=%s",
                 len(selected),
                 total_symbols,
                 selected,
+                sorted(ea_fresh),
                 calls_used_last_min,
                 calls_remaining,
                 estimated_calls,

@@ -11,7 +11,7 @@ trading:
   fallback_exchange: "twelvedata"  # used automatically if MetaTrader5 is unavailable
   scan_interval: 60
   scan_batch:
-    symbols_per_batch: 2
+    symbols_per_batch: 4
     interval_seconds: 60
     max_calls_per_minute: 8
     estimated_calls_per_symbol: 3
