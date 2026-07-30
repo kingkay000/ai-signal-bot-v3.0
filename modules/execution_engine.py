@@ -310,6 +310,26 @@ class ExecutionEngine:
 
         if self.mode == "paper":
             result = self.paper_portfolio.execute(symbol, side, amount, current_price)
+        elif self.mode == "bridge":
+            # In bridge mode the MQL5 EA owns actual execution (SL/TP hits happen on
+            # the broker side).  When the Python bot decides to close a position (e.g.
+            # thesis broken, momentum stall, reversal), it can only signal intent —
+            # there is no synchronous close confirmation from the EA.  We treat the
+            # close as immediately filled at the last-known price so that
+            # risk_manager.close_position() is called, _log_trade_close() writes the
+            # CLOSE event to trade_lifecycle.txt, and the weekly summary is non-zero.
+            result = OrderResult(
+                order_id=f"BRIDGE-CLOSE-{symbol}-{int(time.time())}",
+                symbol=symbol,
+                side=side,
+                price=current_price,
+                amount=amount,
+                status="filled",
+                is_paper=False,
+            )
+            log.info(
+                f"Bridge close recorded for {symbol} @ {current_price:.5f} [{reason}]"
+            )
         else:
             result = self._live_order(symbol, side, amount, current_price)
 
